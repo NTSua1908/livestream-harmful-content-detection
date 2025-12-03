@@ -33,10 +33,29 @@ st.markdown(
         border-radius: 5px;
         margin-bottom: 10px;
         border-left: 5px solid #ccc;
+        color: #1a1a1a;
+        font-weight: 500;
     }
-    .alert-HIGH { background-color: #ffebee; border-color: #f44336; }
-    .alert-MEDIUM { background-color: #fff3e0; border-color: #ff9800; }
-    .alert-LOW { background-color: #fff9c4; border-color: #ffeb3b; }
+    .alert-HIGH { 
+        background-color: #ffebee; 
+        border-color: #f44336;
+        color: #c62828;
+    }
+    .alert-MEDIUM { 
+        background-color: #fff3e0; 
+        border-color: #ff9800;
+        color: #e65100;
+    }
+    .alert-LOW { 
+        background-color: #fffde7; 
+        border-color: #fbc02d;
+        color: #f57f17;
+    }
+    
+    /* Make the alert level text more visible */
+    .alert-card strong {
+        font-size: 1.1em;
+    }
     
     /* Image Grid Styling */
     .stImage { border-radius: 5px; }
@@ -78,7 +97,7 @@ def get_start_time(time_range_str):
 
 def display_alert_row(alert):
     """Render a single alert using HTML/CSS"""
-    level = alert.get("level", "LOW")
+    level = alert.get("type", "LOW")
     ts = format_timestamp(alert.get("timestamp"))
     details = alert.get("details", "")
     type_ = alert.get("detection_type", "Unknown")
@@ -151,7 +170,7 @@ def main():
         a
         for a in raw_alerts
         if convert_to_timestamp(a.get("timestamp", 0)) >= start_ts
-        and a.get("level", "LOW") in selected_levels
+        and a.get("type", "LOW") in selected_levels
     ]
 
     # --- TABS LAYOUT ---
@@ -165,7 +184,7 @@ def main():
         col1, col2, col3, col4 = st.columns(4)
 
         harmful_count = len([d for d in detections if d.get("is_harmful")])
-        high_priority = len([a for a in alerts if a.get("level") == "HIGH"])
+        high_priority = len([a for a in alerts if a.get("type") == "HIGH"])
 
         col1.metric("Total Frames Analyzed", len(detections))
         col2.metric("Harmful Detections", harmful_count)
@@ -186,7 +205,7 @@ def main():
                     df_alerts,
                     x="datetime",
                     y="confidence",
-                    color="level",
+                    color="type",
                     symbol="detection_type",
                     color_discrete_map={
                         "HIGH": "red",

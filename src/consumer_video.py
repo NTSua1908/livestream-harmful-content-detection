@@ -101,7 +101,8 @@ class VideoConsumer:
             return
 
         # 1. Load Labels
-        settings_path = Path(__file__).parent.parent / "violence_settings.yaml"
+        settings_path = Path(__file__).parent.parent / "src/violence_settings.yaml"
+        logger.info(f"Loading label settings from: {settings_path}")
         non_violence = []
         violence = []
 
@@ -291,6 +292,7 @@ class VideoConsumer:
                         "timestamp": timestamp,
                         "detections": result["harmful_detections"],
                         "is_harmful": True,
+                        "data": frame_data,
                     }
                 )
                 # Alert
@@ -316,7 +318,7 @@ class VideoConsumer:
                         "frame_id": frame_id,
                         "detection_type": det_type,
                         "confidence": conf,
-                        "level": level,
+                        "type": level,
                         "details": f"Detected {det_type} ({conf:.1%})",
                     }
                     self.db_handler.save_alert(alert_data)

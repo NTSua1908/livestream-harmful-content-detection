@@ -7,9 +7,13 @@ import numpy as np
 import base64
 import json
 import logging
+import time
+import os
 from datetime import datetime
+from pathlib import Path
 from typing import Dict, List, Any, Optional
 from pymongo import MongoClient
+
 from config import (
     MONGO_HOST,
     MONGO_PORT,
@@ -38,7 +42,12 @@ class MongoDBHandler:
     def connect(self):
         """Connect to MongoDB"""
         try:
-            connection_string = f"mongodb://{MONGO_USERNAME}:{MONGO_PASSWORD}@{MONGO_HOST}:{MONGO_PORT}/"
+            # Nếu không có user/pass, url sẽ gọn hơn. Logic này hỗ trợ cả 2.
+            if MONGO_USERNAME and MONGO_PASSWORD:
+                connection_string = f"mongodb://{MONGO_USERNAME}:{MONGO_PASSWORD}@{MONGO_HOST}:{MONGO_PORT}/"
+            else:
+                connection_string = f"mongodb://{MONGO_HOST}:{MONGO_PORT}/"
+
             self.client = MongoClient(connection_string)
             self.db = self.client[MONGO_DB]
             logger.info(f"Connected to MongoDB at {MONGO_HOST}:{MONGO_PORT}")
@@ -49,7 +58,10 @@ class MongoDBHandler:
     def save_detection(self, detection_data: Dict[str, Any]):
         """Save detection result to database"""
         try:
-            detection_data["timestamp"] = datetime.now()
+            # Thống nhất dùng Unix timestamp nếu chưa có
+            if "timestamp" not in detection_data:
+                detection_data["timestamp"] = time.time()
+
             result = self.db[MONGO_COLLECTION_DETECTIONS].insert_one(detection_data)
             logger.debug(f"Saved detection with ID: {result.inserted_id}")
             return result.inserted_id
@@ -60,9 +72,12 @@ class MongoDBHandler:
     def save_alert(self, alert_data: Dict[str, Any]):
         """Save alert to database"""
         try:
-            alert_data["timestamp"] = datetime.now()
+            # Thống nhất dùng Unix timestamp
+            if "timestamp" not in alert_data:
+                alert_data["timestamp"] = time.time()
+
             result = self.db[MONGO_COLLECTION_ALERTS].insert_one(alert_data)
-            logger.info(f"Saved alert: {alert_data.get('type', 'UNKNOWN')}")
+            logger.info(f"Saved alert: {alert_data.get('detection_type', 'UNKNOWN')}")
             return result.inserted_id
         except Exception as e:
             logger.error(f"Failed to save alert: {e}")
@@ -104,15 +119,7 @@ class MongoDBHandler:
 
 
 def encode_image_to_base64(frame: np.ndarray) -> str:
-    """
-    Encode OpenCV frame to base64 string
-
-    Args:
-        frame: OpenCV image frame (numpy array)
-
-    Returns:
-        Base64 encoded string
-    """
+    """Encode OpenCV frame to base64 string"""
     try:
         _, buffer = cv2.imencode(".jpg", frame)
         jpg_as_text = base64.b64encode(buffer).decode("utf-8")
@@ -123,16 +130,10 @@ def encode_image_to_base64(frame: np.ndarray) -> str:
 
 
 def decode_base64_to_image(base64_string: str) -> Optional[np.ndarray]:
-    """
-    Decode base64 string to OpenCV frame
-
-    Args:
-        base64_string: Base64 encoded image string
-
-    Returns:
-        OpenCV image frame (numpy array) or None
-    """
+    """Decode base64 string to OpenCV frame"""
     try:
+        if not base64_string:
+            return None
         jpg_original = base64.b64decode(base64_string)
         jpg_as_np = np.frombuffer(jpg_original, dtype=np.uint8)
         frame = cv2.imdecode(jpg_as_np, cv2.IMREAD_COLOR)
@@ -143,25 +144,17 @@ def decode_base64_to_image(base64_string: str) -> Optional[np.ndarray]:
 
 
 def draw_detections(frame: np.ndarray, detections: List[Dict]) -> np.ndarray:
-    """
-    Draw bounding boxes and labels on frame
-
-    Args:
-        frame: OpenCV image frame
-        detections: List of detection dictionaries with bbox, class, confidence
-
-    Returns:
-        Frame with drawn detections
-    """
+    """Draw bounding boxes and labels on frame (Skip if bbox is None)"""
     for det in detections:
-        x1, y1, x2, y2 = det["bbox"]
+        bbox = det.get("bbox")
+        if bbox is None:
+            continue  # Skip drawing if no bounding box (CLIP case)
+
+        x1, y1, x2, y2 = bbox
         label = det["class"]
         conf = det["confidence"]
 
-        # Draw bounding box
         cv2.rectangle(frame, (int(x1), int(y1)), (int(x2), int(y2)), (0, 0, 255), 2)
-
-        # Draw label
         label_text = f"{label}: {conf:.2f}"
         cv2.putText(
             frame,
@@ -172,21 +165,11 @@ def draw_detections(frame: np.ndarray, detections: List[Dict]) -> np.ndarray:
             (0, 0, 255),
             2,
         )
-
     return frame
 
 
 def check_toxic_content(text: str, toxic_keywords: List[str]) -> Dict[str, Any]:
-    """
-    Check if text contains toxic keywords
-
-    Args:
-        text: Text to check
-        toxic_keywords: List of toxic keywords
-
-    Returns:
-        Dictionary with is_toxic flag and matched keywords
-    """
+    """Check if text contains toxic keywords (Basic substring matching)"""
     text_lower = text.lower()
     matched_keywords = []
 
@@ -201,90 +184,39 @@ def check_toxic_content(text: str, toxic_keywords: List[str]) -> Dict[str, Any]:
     }
 
 
-def calculate_alert_level(
-    detection_type: str, confidence: float, toxic_score: int = 0
-) -> str:
-    """
-    Calculate alert level based on detection type and confidence
+def calculate_alert_level(detection_type, confidence):
+    """Determine alert level based on confidence"""
+    if isinstance(confidence, str):
+        try:
+            confidence = float(confidence.strip("%")) / 100.0
+        except:
+            confidence = 0.0
 
-    Args:
-        detection_type: Type of detection (weapon, violence, toxic_speech)
-        confidence: Confidence score
-        toxic_score: Number of toxic keywords found
-
-    Returns:
-        Alert level: HIGH, MEDIUM, or LOW
-    """
-    if detection_type == "weapon" and confidence > 0.8:
+    if confidence >= 0.80:
         return "HIGH"
-    elif detection_type == "violence" and confidence > 0.7:
-        return "HIGH"
-    elif toxic_score >= 3:
-        return "HIGH"
-    elif confidence > 0.6 or toxic_score >= 2:
+    elif confidence >= 0.60:
         return "MEDIUM"
-    else:
+    elif confidence >= 0.30:
         return "LOW"
+
+    return "LOW"
 
 
 def save_image_for_training(
-    frame: np.ndarray, detection_type: str, save_dir: str = "data/training_samples"
+    frame: np.ndarray, detection_type: str, save_dir: str = "../data/training_samples"
 ) -> str:
-    """
-    Save detected frame for future model training
-
-    Args:
-        frame: OpenCV image frame
-        detection_type: Type of detection
-        save_dir: Directory to save image
-
-    Returns:
-        Path to saved image
-    """
-    import os
-    from pathlib import Path
-
-    # Create directory if not exists
-    Path(save_dir).mkdir(parents=True, exist_ok=True)
-
-    # Generate filename
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-    filename = f"{detection_type}_{timestamp}.jpg"
-    filepath = os.path.join(save_dir, filename)
-
-    # Save image
-    cv2.imwrite(filepath, frame)
-    logger.info(f"Saved training sample: {filepath}")
-
-    return filepath
-
-
-def format_alert_message(alert_data: Dict[str, Any]) -> str:
-    """
-    Format alert data into readable message
-
-    Args:
-        alert_data: Alert dictionary
-
-    Returns:
-        Formatted alert message
-    """
-    level = alert_data.get("level", "UNKNOWN")
-    detection_type = alert_data.get("detection_type", "unknown")
-    confidence = alert_data.get("confidence", 0)
-    timestamp = alert_data.get("timestamp", datetime.now())
-
-    message = f"""
-🚨 ALERT [{level}] 🚨
-Type: {detection_type}
-Confidence: {confidence:.2%}
-Time: {timestamp.strftime("%Y-%m-%d %H:%M:%S")}
-    """.strip()
-
-    if "details" in alert_data:
-        message += f"\nDetails: {alert_data['details']}"
-
-    return message
+    """Save detected frame for future model training"""
+    try:
+        Path(save_dir).mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        filename = f"{detection_type}_{timestamp}.jpg"
+        filepath = os.path.join(save_dir, filename)
+        cv2.imwrite(filepath, frame)
+        logger.info(f"Saved training sample: {filepath}")
+        return filepath
+    except Exception as e:
+        logger.error(f"Failed to save training image: {e}")
+        return ""
 
 
 class AlertThrottler:
@@ -295,49 +227,13 @@ class AlertThrottler:
         self.last_alerts = {}
 
     def should_send_alert(self, alert_type: str) -> bool:
-        """Check if enough time has passed since last alert of this type"""
-        current_time = datetime.now()
+        """Check if enough time has passed using Unix timestamp"""
+        current_time = time.time()  # Use Unix timestamp
 
         if alert_type in self.last_alerts:
-            time_diff = (current_time - self.last_alerts[alert_type]).total_seconds()
+            time_diff = current_time - self.last_alerts[alert_type]
             if time_diff < self.cooldown:
                 return False
 
         self.last_alerts[alert_type] = current_time
         return True
-
-
-def create_kafka_message(message_type: str, data: Dict[str, Any]) -> bytes:
-    """
-    Create standardized Kafka message
-
-    Args:
-        message_type: Type of message (video, audio, alert)
-        data: Message data
-
-    Returns:
-        JSON encoded bytes
-    """
-    message = {
-        "type": message_type,
-        "timestamp": datetime.now().isoformat(),
-        "data": data,
-    }
-    return json.dumps(message).encode("utf-8")
-
-
-def parse_kafka_message(message_bytes: bytes) -> Dict[str, Any]:
-    """
-    Parse Kafka message
-
-    Args:
-        message_bytes: Raw message bytes
-
-    Returns:
-        Parsed message dictionary
-    """
-    try:
-        return json.loads(message_bytes.decode("utf-8"))
-    except Exception as e:
-        logger.error(f"Failed to parse Kafka message: {e}")
-        return {}

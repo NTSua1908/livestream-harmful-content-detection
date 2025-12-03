@@ -271,7 +271,7 @@ class AudioConsumer:
                         "source": "audio",
                         "frame_id": chunk_id,  # Dùng chunk_id thay frame_id
                         "detection_type": "Audio Event",
-                        "level": "HIGH",
+                        "type": "HIGH",
                         "confidence": sound_event["score"],
                         "details": alert_details,
                         "timestamp": timestamp,
@@ -291,7 +291,7 @@ class AudioConsumer:
                         "source": "audio",
                         "frame_id": chunk_id,
                         "detection_type": "Toxic Speech",
-                        "level": "MEDIUM",
+                        "type": "MEDIUM",
                         "confidence": 1.0,
                         "details": alert_details,
                         "timestamp": timestamp,
