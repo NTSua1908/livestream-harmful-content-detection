@@ -149,7 +149,7 @@ class LivestreamProducer:
             if current_time >= end_time:
                 return self._empty_audio_msg()
 
-            sub_clip = self.audio_clip.subclip(current_time, end_time)
+            sub_clip = self.audio_clip.subclipped(current_time, end_time)
 
             # Ghi ra file tạm wav -> Đọc bytes -> Base64
             with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
@@ -161,7 +161,6 @@ class LivestreamProducer:
                 fps=16000,
                 nbytes=2,
                 codec="pcm_s16le",
-                verbose=False,
                 logger=None,
             )
 

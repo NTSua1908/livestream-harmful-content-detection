@@ -36,23 +36,36 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # --- IMPORT MODELS ---
-# 1. Whisper (Speech to Text)
+# 1. Torch (Core) - Import riêng để tránh NameError
+try:
+    import torch
+
+    TORCH_AVAILABLE = True
+except ImportError as e:
+    logger.error(f"❌ Torch not found: {e}")
+    TORCH_AVAILABLE = False
+
+# 2. Whisper (Speech to Text)
 try:
     import whisper
 
     WHISPER_AVAILABLE = True
-except ImportError:
-    logger.warning("❌ Whisper not found. 'Toxic Speech' detection disabled.")
+except ImportError as e:
+    logger.warning(f"❌ Whisper not found: {e}")
     WHISPER_AVAILABLE = False
 
-# 2. Transformers (Sound Event Detection - Screaming/Yelling)
+# 3. Transformers (Sound Event Detection)
 try:
-    from transformers import ASTImageProcessor, ASTForAudioClassification
-    import torch
+    from transformers import AutoFeatureExtractor, ASTForAudioClassification
 
     TRANSFORMERS_AVAILABLE = True
-except ImportError:
-    logger.warning("❌ Transformers not found. 'Screaming' detection disabled.")
+except ImportError as e:
+    # QUAN TRỌNG: In lỗi 'e' ra để biết tại sao import thất bại
+    logger.warning(f"❌ Transformers import failed: {e}")
+    TRANSFORMERS_AVAILABLE = False
+except Exception as e:
+    # Bắt thêm các lỗi lạ như ValueError do numpy conflict
+    logger.warning(f"❌ Transformers error (other): {e}")
     TRANSFORMERS_AVAILABLE = False
 
 
@@ -84,24 +97,31 @@ class AudioConsumer:
 
     def load_models(self):
         """Load AI Models"""
-        self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        # Kiểm tra Torch trước
+        if TORCH_AVAILABLE:
+            self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        else:
+            self.device = "cpu"
+            logger.warning(
+                "⚠️ Torch not available, defaulting to CPU (features may fail)"
+            )
+
         logger.info(f"Using Device: {self.device}")
 
         # 1. Load Whisper
-        if WHISPER_AVAILABLE:
+        if WHISPER_AVAILABLE and TORCH_AVAILABLE:
             try:
-                # 'tiny' hoặc 'base' là đủ nhanh cho realtime. 'small' chính xác hơn nhưng chậm.
                 self.whisper_model = whisper.load_model("base", device=self.device)
                 logger.info("✅ Whisper Model Loaded")
             except Exception as e:
                 logger.error(f"Error loading Whisper: {e}")
                 self.whisper_model = None
 
-        # 2. Load Audio Spectrogram Transformer (AST)
-        if TRANSFORMERS_AVAILABLE:
+        # 2. Load AST
+        if TRANSFORMERS_AVAILABLE and TORCH_AVAILABLE:
             try:
                 model_name = "MIT/ast-finetuned-audioset-10-10-0.4593"
-                self.ast_processor = ASTImageProcessor.from_pretrained(model_name)
+                self.ast_processor = AutoFeatureExtractor.from_pretrained(model_name)
                 self.ast_model = ASTForAudioClassification.from_pretrained(
                     model_name
                 ).to(self.device)

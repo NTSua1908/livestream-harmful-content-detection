@@ -62,7 +62,7 @@ Hoặc truy cập: http://localhost:8501
 
 # Terminal 1 - Producer
 cd src
-python producer.py --video ../data/v001_converted.avi --loop
+python producer.py --video ../data/Harmful_livestream_detection.mp4 --loop
 
 # Terminal 2 - Video Consumer
 cd src
