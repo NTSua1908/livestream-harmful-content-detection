@@ -291,28 +291,72 @@ def main():
 
     # === TAB 4: AUDIO ANALYSIS ===
     with tab4:
-        st.subheader("🎙️ Audio Transcripts (Simulated)")
+        st.subheader("🎙️ Audio & Speech Analysis")
 
-        # Filter for audio chunks (assumes structure based on your data)
-        audio_chunks = [
+        # Lấy dữ liệu audio (có chunk_id) và lọc theo thời gian
+        audio_events = [
             d
             for d in raw_detections
             if "chunk_id" in d
             and convert_to_timestamp(d.get("timestamp", 0)) >= start_ts
         ]
 
-        if audio_chunks:
-            for chunk in audio_chunks[:10]:
-                is_toxic = chunk.get("is_toxic", False)
-                score = chunk.get("toxic_score", 0)
-                text = chunk.get("transcribed_text", "No speech detected")
+        if audio_events:
+            # Sắp xếp mới nhất lên đầu
+            audio_events.sort(key=lambda x: x.get("timestamp", 0), reverse=True)
 
+            for item in audio_events[:30]:  # Hiển thị 30 mẫu mới nhất
+                # 1. Lấy thông tin từ DB
+                timestamp = format_timestamp(item.get("timestamp"))
+
+                # Thông tin Text (Toxic)
+                text = item.get("transcribed_text", "")
+                is_toxic = item.get("is_toxic", False)
+
+                # Thông tin Âm thanh (Screaming, Explosion...)
+                sound_label = item.get("sound_label", "Speech")
+                sound_conf = item.get("sound_confidence", 0.0)
+                is_screaming = item.get("is_screaming", False)  # Flag từ consumer
+
+                # 2. Xử lý hiển thị
+
+                # --- CASE A: ÂM THANH NGUY HIỂM (TIẾNG NỔ, SÚNG, HÉT) ---
+                # Kiểm tra flag is_screaming hoặc check thủ công label
+                harmful_sounds = [
+                    "Screaming",
+                    "Yelling",
+                    "Explosion",
+                    "Gunshot, gunfire",
+                    "Bang",
+                ]
+
+                if is_screaming or (sound_label in harmful_sounds and sound_conf > 0.3):
+                    st.markdown(
+                        f"""
+                    <div style="background-color: #ffebee; padding: 15px; border-radius: 8px; border-left: 6px solid #f44336; margin-bottom: 15px;">
+                        <h4 style="color: #c62828; margin:0;">🔊 DANGER SOUND: {sound_label}</h4>
+                        <span style="font-size: 0.9em; color: #555;">Detected at: {timestamp}</span><br>
+                        <strong style="color: #c62828;">Confidence:</strong> <span style="color: #c62828;"> {sound_conf:.1%} </span>
+                    </div>
+                    """,
+                        unsafe_allow_html=True,
+                    )
+
+                # --- CASE B: LỜI NÓI ĐỘC HẠI ---
                 if is_toxic:
-                    st.error(f'**Toxic Audio** (Score: {score})\n\n> "{text}"')
-                else:
-                    st.info(f'**Clean Audio**\n\n> "{text}"')
+                    st.error(
+                        f'🤬 **Toxic Speech Detected** ({timestamp})\n\n> "{text}"'
+                    )
+
+                # --- CASE C: BÌNH THƯỜNG (Ẩn bớt để đỡ rối) ---
+                # Chỉ hiện nếu không phải nguy hiểm và có text
+                elif not is_screaming and not is_toxic:
+                    with st.expander(f"ℹ️ Clean Audio Log - {timestamp}"):
+                        st.markdown(f"**Sound:** {sound_label} ({sound_conf:.1%})")
+                        st.markdown(f"**Transcript:** *{text}*")
+
         else:
-            st.info("No audio data available yet.")
+            st.info("No audio analysis data found in the selected period.")
 
     # --- FOOTER & REFRESH ---
     st.markdown("---")

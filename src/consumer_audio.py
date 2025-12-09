@@ -1,18 +1,17 @@
 """
-Audio Consumer: Process audio chunks to detect Toxic Speech (Whisper) and Screaming/Violence (AST)
+Audio Consumer Optimized: Rolling Buffer + Faster-Whisper + AST
+Target: Lightweight, Fast, Accurate for Vietnamese & Sound Events
 """
 
 import logging
 import argparse
-import time
 import json
 import base64
 import tempfile
 import os
 import numpy as np
 import librosa
-import soundfile as sf
-from typing import Dict, Any, Tuple
+from typing import Dict
 
 from kafka import KafkaConsumer
 from kafka.errors import KafkaError
@@ -24,7 +23,7 @@ from config import (
     LOG_LEVEL,
 )
 from utils import (
-    check_toxic_content,  # Hàm check text từ khóa (bạn đã có)
+    check_toxic_content,
     MongoDBHandler,
     AlertThrottler,
 )
@@ -36,55 +35,53 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # --- IMPORT MODELS ---
-# 1. Torch (Core) - Import riêng để tránh NameError
+
+# 1. Torch & AST (Sound Event Detection)
 try:
     import torch
-
-    TORCH_AVAILABLE = True
-except ImportError as e:
-    logger.error(f"❌ Torch not found: {e}")
-    TORCH_AVAILABLE = False
-
-# 2. Whisper (Speech to Text)
-try:
-    import whisper
-
-    WHISPER_AVAILABLE = True
-except ImportError as e:
-    logger.warning(f"❌ Whisper not found: {e}")
-    WHISPER_AVAILABLE = False
-
-# 3. Transformers (Sound Event Detection)
-try:
     from transformers import AutoFeatureExtractor, ASTForAudioClassification
 
     TRANSFORMERS_AVAILABLE = True
 except ImportError as e:
-    # QUAN TRỌNG: In lỗi 'e' ra để biết tại sao import thất bại
-    logger.warning(f"❌ Transformers import failed: {e}")
+    logger.warning(f"❌ Transformers/Torch import failed: {e}")
     TRANSFORMERS_AVAILABLE = False
-except Exception as e:
-    # Bắt thêm các lỗi lạ như ValueError do numpy conflict
-    logger.warning(f"❌ Transformers error (other): {e}")
-    TRANSFORMERS_AVAILABLE = False
+
+# 2. Faster Whisper (Optimized Speech to Text)
+try:
+    from faster_whisper import WhisperModel
+
+    WHISPER_AVAILABLE = True
+except ImportError as e:
+    logger.warning(
+        f"❌ Faster-Whisper not found. Install: pip install faster-whisper. Error: {e}"
+    )
+    WHISPER_AVAILABLE = False
 
 
 class AudioConsumer:
-    """Consumer for processing audio streams"""
+    """Consumer for processing audio streams with Rolling Buffer"""
 
     def __init__(self, kafka_servers: str = KAFKA_BOOTSTRAP_SERVERS):
         self.kafka_servers = kafka_servers
         self.db_handler = MongoDBHandler()
-        self.alert_throttler = AlertThrottler(cooldown_seconds=10)
+        self.alert_throttler = AlertThrottler(
+            cooldown_seconds=5
+        )  # Giảm cooldown để test nhanh hơn
         self.chunk_count = 0
 
         # Audio Params
-        self.target_sample_rate = 16000  # Whisper & AST đều thích 16k
+        self.target_sample_rate = 16000
 
-        logger.info("Initializing AudioConsumer...")
+        # --- ROLLING BUFFER CONFIG ---
+        self.buffer_duration = 5.0  # Giữ lại 5 giây ngữ cảnh
+        self.max_buffer_samples = int(self.buffer_duration * self.target_sample_rate)
+        # Buffer khởi tạo rỗng
+        self.audio_buffer = np.array([], dtype=np.float32)
+
+        logger.info("Initializing AudioConsumer (Optimized)...")
         self.load_models()
 
-        # Danh sách các âm thanh nguy hiểm cần bắt (theo nhãn của AudioSet)
+        # Danh sách âm thanh nguy hiểm
         self.harmful_sound_labels = [
             "Screaming",
             "Yelling",
@@ -93,39 +90,45 @@ class AudioConsumer:
             "Gunshot, gunfire",
             "Explosion",
             "Bang",
+            "Aggressive",
         ]
 
     def load_models(self):
-        """Load AI Models"""
-        # Kiểm tra Torch trước
-        if TORCH_AVAILABLE:
-            self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        """Load AI Models (Optimized for Laptop/Demo)"""
+
+        # Setup Device
+        if torch.cuda.is_available():
+            self.device = "cuda"
+            self.compute_type = "float16"  # Hoặc "int8_float16" nếu GPU yếu
         else:
             self.device = "cpu"
-            logger.warning(
-                "⚠️ Torch not available, defaulting to CPU (features may fail)"
-            )
+            self.compute_type = "int8"  # CPU chạy int8 cực nhanh
 
-        logger.info(f"Using Device: {self.device}")
+        logger.info(f"Using Device: {self.device} | Compute Type: {self.compute_type}")
 
-        # 1. Load Whisper
-        if WHISPER_AVAILABLE and TORCH_AVAILABLE:
+        # 1. Load Faster-Whisper (Thay cho Whisper gốc)
+        if WHISPER_AVAILABLE:
             try:
-                self.whisper_model = whisper.load_model("base", device=self.device)
-                logger.info("✅ Whisper Model Loaded")
+                # Model 'small' là cân bằng nhất cho tiếng Việt trên máy cá nhân
+                # 'tiny' quá tệ, 'base' tạm được, 'small' khá tốt.
+                logger.info("⏳ Loading Faster-Whisper 'small' model...")
+                self.whisper_model = WhisperModel(
+                    "small", device=self.device, compute_type=self.compute_type
+                )
+                logger.info("✅ Faster-Whisper Loaded")
             except Exception as e:
-                logger.error(f"Error loading Whisper: {e}")
+                logger.error(f"Error loading Faster-Whisper: {e}")
                 self.whisper_model = None
 
-        # 2. Load AST
-        if TRANSFORMERS_AVAILABLE and TORCH_AVAILABLE:
+        # 2. Load AST (Giữ nguyên vì chưa có thay thế nhẹ hơn tốt hơn)
+        if TRANSFORMERS_AVAILABLE:
             try:
                 model_name = "MIT/ast-finetuned-audioset-10-10-0.4593"
                 self.ast_processor = AutoFeatureExtractor.from_pretrained(model_name)
                 self.ast_model = ASTForAudioClassification.from_pretrained(
                     model_name
                 ).to(self.device)
-                logger.info("✅ AST Model (Event Detection) Loaded")
+                logger.info("✅ AST Model Loaded")
             except Exception as e:
                 logger.error(f"Error loading AST: {e}")
                 self.ast_model = None
@@ -138,9 +141,8 @@ class AudioConsumer:
                 bootstrap_servers=self.kafka_servers,
                 auto_offset_reset="latest",
                 enable_auto_commit=True,
-                group_id="audio-processing-group",
+                group_id="audio-group-optimized",
                 value_deserializer=lambda m: json.loads(m.decode("utf-8")),
-                max_poll_records=5,  # Xử lý ít thôi vì Audio nặng
             )
             logger.info(f"Connected to Kafka topic: {KAFKA_TOPIC_AUDIO}")
         except KafkaError as e:
@@ -148,38 +150,28 @@ class AudioConsumer:
             raise
 
     def decode_audio(self, base64_data: str) -> np.ndarray:
-        """
-        Decode base64 -> Save temp .wav -> Load via Librosa -> Return Numpy Array
-        """
+        """Decode base64 to numpy array"""
         try:
             audio_bytes = base64.b64decode(base64_data)
-
-            # Tạo file tạm để librosa đọc (librosa cần file path hoặc file-like object)
             with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as temp_file:
                 temp_file.write(audio_bytes)
                 temp_path = temp_file.name
 
             # Load audio & Resample về 16kHZ
             audio_array, _ = librosa.load(temp_path, sr=self.target_sample_rate)
-
-            # Xóa file tạm
             os.remove(temp_path)
-
             return audio_array
         except Exception as e:
             logger.error(f"Audio decoding error: {e}")
             return None
 
     def detect_sound_events(self, audio_array: np.ndarray) -> Dict:
-        """
-        Detect non-speech events (Screaming, Explosions...) using AST
-        """
+        """AST Detection"""
         if not self.ast_model:
             return {"is_harmful": False, "label": None, "score": 0.0}
 
         try:
-            # AST model yêu cầu input độ dài cố định, ta padding hoặc cắt
-            # Đơn giản hóa: Chỉ lấy 1024 điểm đặc trưng đầu tiên (khoảng 10s)
+            # AST xử lý tốt nhất khoảng 5-10s, nhưng buffer của mình 5s là đẹp
             inputs = self.ast_processor(
                 audio_array, sampling_rate=self.target_sample_rate, return_tensors="pt"
             )
@@ -187,54 +179,47 @@ class AudioConsumer:
 
             with torch.no_grad():
                 outputs = self.ast_model(**inputs)
-                logits = outputs.logits
-                probs = torch.softmax(logits, dim=-1)
-
-                # Lấy Top 1 sự kiện
+                probs = torch.softmax(outputs.logits, dim=-1)
                 score, idx = torch.max(probs, dim=-1)
                 predicted_label = self.ast_model.config.id2label[idx.item()]
                 score_val = score.item()
 
-            # Check xem có phải âm thanh nguy hiểm không
-            is_harmful = False
-            # Ngưỡng thấp (0.3) vì model này detect nhiều class, score thường bị chia nhỏ
-            if score_val > 0.3 and predicted_label in self.harmful_sound_labels:
-                is_harmful = True
+            is_harmful = (
+                score_val > 0.35 and predicted_label in self.harmful_sound_labels
+            )  # Tăng ngưỡng lên chút
 
             return {
                 "is_harmful": is_harmful,
                 "label": predicted_label,
                 "score": score_val,
             }
-
         except Exception as e:
-            logger.error(f"AST detection error: {e}")
+            # logger.error(f"AST error: {e}") # Tắt log rác nếu cần
             return {"is_harmful": False, "label": None, "score": 0.0}
 
-    def transcribe_and_check_toxic(self, audio_array: np.ndarray) -> Dict:
-        """
-        Speech-to-text -> Check keywords
-        """
+    def transcribe_and_check_toxic(self, audio_buffer: np.ndarray) -> Dict:
+        """Faster-Whisper Transcription + Keyword Check"""
         if not self.whisper_model:
             return {"is_toxic": False, "text": "", "keywords": []}
 
         try:
-            # Whisper yêu cầu float32
-            audio_array = audio_array.astype(np.float32)
+            # Faster-whisper cực nhanh
+            # beam_size=1 để nhanh nhất có thể (greedy search)
+            segments, _ = self.whisper_model.transcribe(
+                audio_buffer,
+                language="vi",
+                beam_size=1,
+                vad_filter=True,  # Tự động lọc khoảng lặng, giúp chính xác hơn
+            )
 
-            # Transcribe
-            # Note: Whisper có thể xử lý trực tiếp numpy array
-            result = self.whisper_model.transcribe(
-                audio_array, fp16=False, language="vi"
-            )  # fp16=False để chạy trên CPU ok
-            text = result["text"].strip()
+            # Gộp text từ các segments
+            text = " ".join([s.text for s in segments]).strip()
 
             if not text:
                 return {"is_toxic": False, "text": "", "keywords": []}
 
-            # Check toxic (Dùng hàm utils có sẵn)
-            # Giả định utils trả về: {'is_toxic': bool, 'matched_keywords': list, 'toxic_score': int}
-            from config import TOXIC_KEYWORDS  # Import ở đây để đảm bảo có data
+            # Check toxic
+            from config import TOXIC_KEYWORDS
 
             toxic_result = check_toxic_content(text, TOXIC_KEYWORDS)
 
@@ -246,11 +231,13 @@ class AudioConsumer:
             }
 
         except Exception as e:
-            logger.error(f"Whisper transcription error: {e}")
+            logger.error(f"Whisper error: {e}")
             return {"is_toxic": False, "text": "", "keywords": []}
 
     def process_message(self, message: Dict):
-        """Main processing loop for a chunk"""
+        """
+        Main processing with ROLLING BUFFER logic
+        """
         chunk_id = message.get("chunk_id")
         timestamp = message.get("timestamp")
         b64_data = message.get("data")
@@ -258,38 +245,47 @@ class AudioConsumer:
         if not b64_data:
             return
 
-        # 1. Decode Audio
-        audio_array = self.decode_audio(b64_data)
-        if audio_array is None or len(audio_array) == 0:
+        # 1. Decode chunk mới (1 giây)
+        new_chunk = self.decode_audio(b64_data)
+        if new_chunk is None:
             return
 
-        # 2. Parallel Analysis (Tuần tự trong code này cho đơn giản)
+        # 2. CẬP NHẬT ROLLING BUFFER
+        # Nối chunk mới vào đuôi buffer hiện tại
+        self.audio_buffer = np.concatenate((self.audio_buffer, new_chunk))
 
-        # A. Detect Sound Events (Gào thét, nổ...)
-        sound_event = self.detect_sound_events(audio_array)
+        # Nếu buffer dài quá 5 giây, cắt bớt phần đầu (cũ nhất)
+        if len(self.audio_buffer) > self.max_buffer_samples:
+            self.audio_buffer = self.audio_buffer[-self.max_buffer_samples :]
 
-        # B. Detect Toxic Speech (Chửi bậy...)
-        speech_result = self.transcribe_and_check_toxic(audio_array)
+        # Chỉ xử lý khi buffer đã có ít nhất 1-2 giây để model đoán chuẩn hơn
+        # (Lúc mới khởi động có thể bỏ qua vài chunk đầu)
+        if len(self.audio_buffer) < 16000:
+            return
 
-        # 3. Logic Tổng hợp & Alert
-        is_alert = False
-        alert_type = "INFO"
+        # --- PHÂN TÍCH ---
+
+        # A. Detect Sound (AST) - Dùng toàn bộ buffer (5s) để detect chính xác hơn
+        sound_event = self.detect_sound_events(self.audio_buffer)
+
+        # B. Transcribe (Whisper) - Dùng toàn bộ buffer (5s) để lấy ngữ cảnh
+        speech_result = self.transcribe_and_check_toxic(self.audio_buffer)
+
+        # 3. Alert Logic
         alert_details = ""
 
-        # Check Âm thanh (Screaming)
+        # --- Xử lý AST Alert ---
         if sound_event["is_harmful"]:
-            is_alert = True
-            alert_type = "SCREAMING/VIOLENCE"
             alert_details = (
-                f"Detected sound: {sound_event['label']} ({sound_event['score']:.1%})"
+                f"Detected: {sound_event['label']} ({sound_event['score']:.1%})"
             )
-            logger.warning(f"🔊 ALERT: {alert_details}")
+            logger.warning(f"🔊 {alert_details}")
 
             if self.alert_throttler.should_send_alert("audio_scream"):
                 self.db_handler.save_alert(
                     {
                         "source": "audio",
-                        "frame_id": chunk_id,  # Dùng chunk_id thay frame_id
+                        "frame_id": chunk_id,
                         "detection_type": "Audio Event",
                         "type": "HIGH",
                         "confidence": sound_event["score"],
@@ -298,12 +294,12 @@ class AudioConsumer:
                     }
                 )
 
-        # Check Lời nói (Toxic)
+        # --- Xử lý Toxic Alert ---
         if speech_result["is_toxic"]:
-            is_alert = True
-            alert_type = "TOXIC SPEECH"
-            alert_details = f"Toxic words: {speech_result['keywords']} in text: '{speech_result['text']}'"
-            logger.warning(f"🤬 ALERT: {alert_details}")
+            alert_details = (
+                f"Toxic: {speech_result['keywords']} | '{speech_result['text']}'"
+            )
+            logger.warning(f"🤬 {alert_details}")
 
             if self.alert_throttler.should_send_alert("audio_toxic"):
                 self.db_handler.save_alert(
@@ -318,12 +314,13 @@ class AudioConsumer:
                     }
                 )
 
-        # 4. Save Detection Record (Log lại mọi thứ)
+        # 4. Save Record
+        # Lưu text đầy đủ để hiển thị lên dashboard
         self.db_handler.save_detection(
             {
                 "chunk_id": chunk_id,
                 "timestamp": timestamp,
-                "transcribed_text": speech_result["text"],
+                "transcribed_text": speech_result["text"],  # Text này sẽ dài (5s)
                 "sound_label": sound_event["label"],
                 "sound_confidence": sound_event["score"],
                 "is_toxic": speech_result["is_toxic"],
@@ -331,9 +328,14 @@ class AudioConsumer:
             }
         )
 
-        if self.chunk_count % 10 == 0:
+        if self.chunk_count % 5 == 0:
+            short_text = (
+                speech_result["text"][-50:]
+                if len(speech_result["text"]) > 50
+                else speech_result["text"]
+            )
             logger.info(
-                f"Processed chunk {chunk_id}: {sound_event['label']} | Text: {speech_result['text'][:30]}..."
+                f"Chunk {chunk_id} | Sound: {sound_event['label']} ({sound_event['score']:.2f}) | Text: ...{short_text}"
             )
 
         self.chunk_count += 1
@@ -341,15 +343,13 @@ class AudioConsumer:
     def run(self):
         try:
             self.connect_kafka()
-            logger.info("🎧 Audio Consumer listening...")
-
+            logger.info("🎧 Audio Consumer (Optimized) listening...")
             for msg in self.consumer:
                 self.process_message(msg.value)
-
         except KeyboardInterrupt:
             logger.info("Stopped.")
         finally:
-            if self.consumer:
+            if hasattr(self, "consumer") and self.consumer:
                 self.consumer.close()
             self.db_handler.close()
 
@@ -358,5 +358,4 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--kafka", type=str, default=KAFKA_BOOTSTRAP_SERVERS)
     args = parser.parse_args()
-
     AudioConsumer(args.kafka).run()

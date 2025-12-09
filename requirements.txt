@@ -30,3 +30,4 @@ torchaudio
 opencv-python-headless
 pymongo
 moviepy
+faster-whisper
