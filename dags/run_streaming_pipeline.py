@@ -35,9 +35,15 @@ DATA_DIR = "/opt/airflow/data"
 # 1. Task chạy Producer
 # Producer thường sẽ kết thúc khi hết video (nếu không loop)
 # Log sẽ hiện ra từng dòng "Sent frame X..."
-start_producer = BashOperator(
-    task_id="start_producer",
+start_producer_1 = BashOperator(
+    task_id="start_producer_1",
     bash_command=f"cd {SRC_DIR} && python -u producer.py --video {DATA_DIR}/gun.mp4",
+    dag=dag,
+)
+
+start_producer_2 = BashOperator(
+    task_id="start_producer_2",
+    bash_command=f"cd {SRC_DIR} && python -u producer.py --video {DATA_DIR}/Harmful_livestream_detection.mp4",
     dag=dag,
 )
 

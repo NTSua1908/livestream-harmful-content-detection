@@ -31,3 +31,7 @@ opencv-python-headless
 pymongo
 moviepy
 faster-whisper
+tensorflow 
+tensorflow-hub
+openai-whisper 
+soundfile

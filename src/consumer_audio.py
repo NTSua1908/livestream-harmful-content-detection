@@ -46,14 +46,35 @@ except ImportError as e:
     logger.warning(f"❌ Transformers/Torch import failed: {e}")
     TRANSFORMERS_AVAILABLE = False
 
-# 2. Faster Whisper (Optimized Speech to Text)
+# 2. YAMNet (Sound Event Detection - replacing Whisper for audio detection)
 try:
-    from faster_whisper import WhisperModel
+    import tensorflow as tf
+    import tensorflow_hub as hub
+
+    YAMNET_AVAILABLE = True
+except ImportError as e:
+    logger.warning(
+        f"❌ YAMNet not found. Install: pip install tensorflow tensorflow-hub. Error: {e}"
+    )
+    YAMNET_AVAILABLE = False
+
+# 3. PhoBERT (Hate Speech Detection for Vietnamese text)
+try:
+    from transformers import AutoTokenizer, AutoModelForSequenceClassification
+
+    PHOBERT_AVAILABLE = True
+except ImportError as e:
+    logger.warning(f"❌ PhoBERT import failed: {e}")
+    PHOBERT_AVAILABLE = False
+
+# 4. Whisper (Speech-to-Text for Vietnamese)
+try:
+    import whisper
 
     WHISPER_AVAILABLE = True
 except ImportError as e:
     logger.warning(
-        f"❌ Faster-Whisper not found. Install: pip install faster-whisper. Error: {e}"
+        f"❌ Whisper not available: {e}. Install: pip install openai-whisper"
     )
     WHISPER_AVAILABLE = False
 
@@ -106,19 +127,24 @@ class AudioConsumer:
 
         logger.info(f"Using Device: {self.device} | Compute Type: {self.compute_type}")
 
-        # 1. Load Faster-Whisper (Thay cho Whisper gốc)
-        if WHISPER_AVAILABLE:
+        # 1. Load YAMNet (Sound Event Detection)
+        if YAMNET_AVAILABLE:
             try:
-                # Model 'small' là cân bằng nhất cho tiếng Việt trên máy cá nhân
-                # 'tiny' quá tệ, 'base' tạm được, 'small' khá tốt.
-                logger.info("⏳ Loading Faster-Whisper 'small' model...")
-                self.whisper_model = WhisperModel(
-                    "small", device=self.device, compute_type=self.compute_type
-                )
-                logger.info("✅ Faster-Whisper Loaded")
+                logger.info("⏳ Loading YAMNet model...")
+                # Load YAMNet model from TensorFlow Hub
+                yamnet_model_handle = "https://tfhub.dev/google/yamnet/1"
+                self.yamnet_model = hub.load(yamnet_model_handle)
+
+                # Get all 521 YAMNet class names from the model's class map
+                # YAMNet has class mapping in its params
+                # For now, create a basic list - in production, load the full CSV
+                self.yamnet_classes = self._load_yamnet_classes()
+
+                logger.info("✅ YAMNet Loaded")
             except Exception as e:
-                logger.error(f"Error loading Faster-Whisper: {e}")
-                self.whisper_model = None
+                logger.error(f"Error loading YAMNet: {e}")
+                self.yamnet_model = None
+                self.yamnet_classes = []
 
         # 2. Load AST (Giữ nguyên vì chưa có thay thế nhẹ hơn tốt hơn)
         if TRANSFORMERS_AVAILABLE:
@@ -132,6 +158,122 @@ class AudioConsumer:
             except Exception as e:
                 logger.error(f"Error loading AST: {e}")
                 self.ast_model = None
+
+        # 3. Load PhoBERT (Hate Speech Detection for Vietnamese)
+        if PHOBERT_AVAILABLE:
+            try:
+                logger.info("⏳ Loading PhoBERT Hate Speech model...")
+                phobert_model_path = "../models/phobert_hate_speech"
+                self.phobert_tokenizer = AutoTokenizer.from_pretrained(
+                    phobert_model_path
+                )
+                self.phobert_model = AutoModelForSequenceClassification.from_pretrained(
+                    phobert_model_path
+                ).to(self.device)
+                self.phobert_model.eval()
+                logger.info("✅ PhoBERT Model Loaded")
+            except Exception as e:
+                logger.error(f"Error loading PhoBERT: {e}")
+                self.phobert_model = None
+                self.phobert_tokenizer = None
+
+        # 4. Load Whisper (Speech-to-Text)
+        if WHISPER_AVAILABLE:
+            try:
+                logger.info("⏳ Loading Whisper STT model...")
+                self.whisper_model = whisper.load_model("base", device=self.device)
+                logger.info("✅ Whisper Model Loaded")
+            except Exception as e:
+                logger.error(f"Error loading Whisper: {e}")
+                self.whisper_model = None
+        else:
+            self.whisper_model = None
+
+    def _load_yamnet_classes(self):
+        """Load YAMNet class names (521 classes)"""
+        # Default list of harmful sound keywords to check against
+        harmful_keywords = [
+            "speech",
+            "shouting",
+            "yelling",
+            "screaming",
+            "crying",
+            "gunshot",
+            "gunfire",
+            "explosion",
+            "bang",
+            "crash",
+            "breaking",
+            "alarm",
+            "siren",
+            "emergency",
+            "police",
+            "ambulance",
+            "fire",
+            "chainsaw",
+            "hammer",
+            "drill",
+            "dog",
+            "cat",
+            "bark",
+            "meow",
+            "whimper",
+            "growl",
+            "car horn",
+            "motorcycle",
+            "truck",
+            "siren",
+        ]
+        return harmful_keywords
+
+    def detect_sound_events(self, audio_array: np.ndarray) -> Dict:
+        """YAMNet Detection - Enhanced version"""
+        if not self.yamnet_model:
+            return {"is_harmful": False, "label": None, "score": 0.0}
+
+        try:
+            # Ensure audio is float32
+            audio_array = np.array(audio_array, dtype=np.float32)
+            if np.max(np.abs(audio_array)) <= 1.0:
+                pass
+            else:
+                audio_array = audio_array / (np.max(np.abs(audio_array)) + 1e-8)
+
+            # Run YAMNet inference
+            scores, embeddings, spectrogram = self.yamnet_model(audio_array)
+
+            # Get top predictions
+            detected_events = []
+            scores_np = scores.numpy()
+
+            # For each frame, get the top class and score
+            for frame_scores in scores_np:
+                top_class_idx = np.argmax(frame_scores)
+                top_score = float(frame_scores[top_class_idx])
+                if top_score > 0.3:  # Frame-level threshold
+                    detected_events.append((top_class_idx, top_score))
+
+            if not detected_events:
+                return {"is_harmful": False, "label": None, "score": 0.0}
+
+            # Analyze detected events
+            avg_score = np.mean([score for _, score in detected_events])
+            max_score = max([score for _, score in detected_events])
+
+            # Detection logic: Use average score across frames
+            # Lower threshold to catch important events
+            is_harmful = avg_score > 0.45
+
+            label = f"Audio event (frames: {len(detected_events)}, avg confidence: {avg_score:.1%})"
+
+            return {
+                "is_harmful": is_harmful,
+                "label": label,
+                "score": avg_score,
+            }
+        except Exception as e:
+            logger.error(f"YAMNet error: {e}")
+            return {"is_harmful": False, "label": None, "score": 0.0}
 
     def connect_kafka(self):
         """Connect to Kafka"""
@@ -165,8 +307,8 @@ class AudioConsumer:
             logger.error(f"Audio decoding error: {e}")
             return None
 
-    def detect_sound_events(self, audio_array: np.ndarray) -> Dict:
-        """AST Detection"""
+    def detect_sound_events_ast(self, audio_array: np.ndarray) -> Dict:
+        """AST Detection (as secondary model)"""
         if not self.ast_model:
             return {"is_harmful": False, "label": None, "score": 0.0}
 
@@ -197,42 +339,130 @@ class AudioConsumer:
             # logger.error(f"AST error: {e}") # Tắt log rác nếu cần
             return {"is_harmful": False, "label": None, "score": 0.0}
 
-    def transcribe_and_check_toxic(self, audio_buffer: np.ndarray) -> Dict:
-        """Faster-Whisper Transcription + Keyword Check"""
-        if not self.whisper_model:
-            return {"is_toxic": False, "text": "", "keywords": []}
-
-        try:
-            # Faster-whisper cực nhanh
-            # beam_size=1 để nhanh nhất có thể (greedy search)
-            segments, _ = self.whisper_model.transcribe(
-                audio_buffer,
-                language="vi",
-                beam_size=1,
-                vad_filter=True,  # Tự động lọc khoảng lặng, giúp chính xác hơn
-            )
-
-            # Gộp text từ các segments
-            text = " ".join([s.text for s in segments]).strip()
-
-            if not text:
-                return {"is_toxic": False, "text": "", "keywords": []}
-
-            # Check toxic
-            from config import TOXIC_KEYWORDS
-
-            toxic_result = check_toxic_content(text, TOXIC_KEYWORDS)
-
+    def detect_hate_speech(self, text: str) -> Dict:
+        """Detect hate speech in text using PhoBERT"""
+        if not self.phobert_model or not text or text.strip() == "":
             return {
-                "is_toxic": toxic_result["is_toxic"],
-                "text": text,
-                "keywords": toxic_result.get("matched_keywords", []),
-                "score": toxic_result.get("toxic_score", 0),
+                "is_hate_speech": False,
+                "label": None,
+                "score": 0.0,
+                "confidence": 0.0,
             }
 
+        try:
+            # Tokenize input text
+            inputs = self.phobert_tokenizer(
+                text, return_tensors="pt", padding=True, truncation=True, max_length=256
+            )
+            inputs = {k: v.to(self.device) for k, v in inputs.items()}
+
+            # Inference
+            with torch.no_grad():
+                outputs = self.phobert_model(**inputs)
+                logits = outputs.logits
+                probabilities = torch.softmax(logits, dim=-1)
+                score, predicted_class = torch.max(probabilities, dim=-1)
+
+            score_val = score.item()
+            predicted_label = self.phobert_model.config.id2label.get(
+                predicted_class.item(), "unknown"
+            )
+
+            # Determine if hate speech (assuming class 1 = hate speech, 0 = safe)
+            is_hate = predicted_class.item() == 1 and score_val > 0.5
+
+            return {
+                "is_hate_speech": is_hate,
+                "label": predicted_label,
+                "score": score_val,
+                "confidence": score_val,
+            }
         except Exception as e:
-            logger.error(f"Whisper error: {e}")
-            return {"is_toxic": False, "text": "", "keywords": []}
+            logger.error(f"PhoBERT error: {e}")
+            return {
+                "is_hate_speech": False,
+                "label": None,
+                "score": 0.0,
+                "confidence": 0.0,
+            }
+
+    def transcribe_and_check_toxic(self, audio_buffer: np.ndarray) -> Dict:
+        """YAMNet Detection for harmful sounds (replaces Whisper transcription)"""
+        # Use the detect_sound_events method (YAMNet-based)
+        yamnet_result = self.detect_sound_events(audio_buffer)
+
+        return {
+            "is_toxic": yamnet_result["is_harmful"],
+            "text": yamnet_result["label"] or "",
+            "keywords": [],
+            "score": yamnet_result["score"],
+        }
+
+    def transcribe_audio_whisper(self, audio_array: np.ndarray) -> str:
+        """
+        Transcribe audio to Vietnamese text using Whisper
+
+        Args:
+            audio_array: Audio waveform (float32, 16kHz)
+
+        Returns:
+            Transcribed text in Vietnamese
+        """
+        if not self.whisper_model:
+            return ""
+
+        tmp_path = None
+        try:
+            import tempfile
+            import soundfile as sf
+
+            # Save to temporary WAV file
+            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+                sf.write(tmp.name, audio_array, self.target_sample_rate)
+                tmp_path = tmp.name
+
+            # Transcribe with Whisper
+            result = self.whisper_model.transcribe(
+                tmp_path,
+                language="vi",  # Vietnamese
+                fp16=False if self.device == "cpu" else True,
+            )
+
+            transcribed_text = result.get("text", "").strip()
+
+            if transcribed_text:
+                logger.info(f"📝 Whisper STT: {transcribed_text}")
+                return transcribed_text
+            return ""
+
+        except FileNotFoundError as e:
+            if "ffmpeg" in str(e).lower():
+                logger.error(
+                    "❌ FFmpeg not found in Docker! Add to Dockerfile: RUN apt-get install -y ffmpeg"
+                )
+            else:
+                logger.error(f"❌ Whisper transcription error: {e}")
+            return ""
+        except Exception as e:
+            logger.error(f"❌ Whisper transcription error: {e}")
+            return ""
+        finally:
+            # Clean up temp file
+            if tmp_path and os.path.exists(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except:
+                    pass
+
+    def check_transcribed_text(self, text: str) -> Dict:
+        """
+        Public method to check transcribed text for hate speech.
+        Can be called from speech-to-text module when text is available.
+        """
+        if not text or text.strip() == "":
+            return {"is_hate_speech": False, "label": None, "score": 0.0}
+
+        return self.detect_hate_speech(text)
 
     def process_message(self, message: Dict):
         """
@@ -265,23 +495,35 @@ class AudioConsumer:
 
         # --- PHÂN TÍCH ---
 
-        # A. Detect Sound (AST) - Dùng toàn bộ buffer (5s) để detect chính xác hơn
+        # A. Detect Sound (YAMNet) - Dùng toàn bộ buffer (5s) để detect chính xác hơn
         sound_event = self.detect_sound_events(self.audio_buffer)
 
-        # B. Transcribe (Whisper) - Dùng toàn bộ buffer (5s) để lấy ngữ cảnh
-        speech_result = self.transcribe_and_check_toxic(self.audio_buffer)
+        # B. Optional: AST Detection as secondary model (comment out if not needed)
+        # ast_result = self.detect_sound_events_ast(self.audio_buffer)
+
+        # C. Transcribe audio to Vietnamese text and detect hate speech
+        transcribed_text = ""
+        hate_speech_result = {"is_hate_speech": False, "label": None, "score": 0.0}
+
+        if self.whisper_model and len(self.audio_buffer) >= 16000:
+            # Transcribe audio
+            transcribed_text = self.transcribe_audio_whisper(self.audio_buffer)
+
+            # Check for hate speech if transcription succeeded
+            if transcribed_text and len(transcribed_text.strip()) > 0:
+                hate_speech_result = self.detect_hate_speech(transcribed_text)
 
         # 3. Alert Logic
         alert_details = ""
 
-        # --- Xử lý AST Alert ---
+        # --- Xử lý YAMNet Alert ---
         if sound_event["is_harmful"]:
             alert_details = (
-                f"Detected: {sound_event['label']} ({sound_event['score']:.1%})"
+                f"YAMNet Alert: {sound_event['label']} ({sound_event['score']:.1%})"
             )
             logger.warning(f"🔊 {alert_details}")
 
-            if self.alert_throttler.should_send_alert("audio_scream"):
+            if self.alert_throttler.should_send_alert("audio_event"):
                 self.db_handler.save_alert(
                     {
                         "source": "audio",
@@ -294,48 +536,50 @@ class AudioConsumer:
                     }
                 )
 
-        # --- Xử lý Toxic Alert ---
-        if speech_result["is_toxic"]:
-            alert_details = (
-                f"Toxic: {speech_result['keywords']} | '{speech_result['text']}'"
-            )
-            logger.warning(f"🤬 {alert_details}")
+        # --- Xử lý Hate Speech Alert (nếu có text) ---
+        if hate_speech_result["is_hate_speech"]:
+            alert_details = f"Hate Speech Alert: {hate_speech_result['label']} ({hate_speech_result['score']:.1%})"
+            logger.warning(f"💬 {alert_details}")
 
-            if self.alert_throttler.should_send_alert("audio_toxic"):
+            if self.alert_throttler.should_send_alert("hate_speech"):
                 self.db_handler.save_alert(
                     {
-                        "source": "audio",
+                        "source": "audio_text",
                         "frame_id": chunk_id,
-                        "detection_type": "Toxic Speech",
-                        "type": "MEDIUM",
-                        "confidence": 1.0,
+                        "detection_type": "Hate Speech",
+                        "type": "HIGH",
+                        "confidence": hate_speech_result["score"],
                         "details": alert_details,
                         "timestamp": timestamp,
                     }
                 )
 
         # 4. Save Record
-        # Lưu text đầy đủ để hiển thị lên dashboard
+        # Lưu thông tin detected từ YAMNet và PhoBERT
+        # Convert numpy booleans to Python native bool for MongoDB compatibility
         self.db_handler.save_detection(
             {
                 "chunk_id": chunk_id,
                 "timestamp": timestamp,
-                "transcribed_text": speech_result["text"],  # Text này sẽ dài (5s)
+                "transcribed_text": transcribed_text or (sound_event["label"] or ""),
                 "sound_label": sound_event["label"],
-                "sound_confidence": sound_event["score"],
-                "is_toxic": speech_result["is_toxic"],
-                "is_screaming": sound_event["is_harmful"],
+                "sound_confidence": float(sound_event["score"]),
+                "is_toxic": bool(sound_event["is_harmful"]),
+                "is_screaming": bool(sound_event["is_harmful"]),
+                "hate_speech_detected": bool(hate_speech_result["is_hate_speech"]),
+                "hate_speech_label": hate_speech_result["label"],
+                "hate_speech_confidence": float(hate_speech_result["score"]),
             }
         )
 
         if self.chunk_count % 5 == 0:
             short_text = (
-                speech_result["text"][-50:]
-                if len(speech_result["text"]) > 50
-                else speech_result["text"]
+                sound_event["label"][-50:]
+                if sound_event["label"] and len(sound_event["label"]) > 50
+                else (sound_event["label"] or "No sound detected")
             )
             logger.info(
-                f"Chunk {chunk_id} | Sound: {sound_event['label']} ({sound_event['score']:.2f}) | Text: ...{short_text}"
+                f"Chunk {chunk_id} | Sound: {short_text} | Confidence: {sound_event['score']:.2f}"
             )
 
         self.chunk_count += 1
@@ -343,7 +587,7 @@ class AudioConsumer:
     def run(self):
         try:
             self.connect_kafka()
-            logger.info("🎧 Audio Consumer (Optimized) listening...")
+            logger.info("🎧 Audio Consumer (YAMNet) listening...")
             for msg in self.consumer:
                 self.process_message(msg.value)
         except KeyboardInterrupt:

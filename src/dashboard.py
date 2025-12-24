@@ -296,7 +296,7 @@ def main():
                             try:
                                 img = decode_base64_to_image(item["data"])
                                 if img is not None:
-                                    st.image(img, channels="BGR", use_container_width=True)
+                                    st.image(img, channels="BGR", width='stretch')
                                     img_displayed = True
                             except Exception as e:
                                 pass
@@ -306,7 +306,7 @@ def main():
                             try:
                                 img = decode_base64_to_image(item["original_data"])
                                 if img is not None:
-                                    st.image(img, channels="BGR", use_container_width=True)
+                                    st.image(img, channels="BGR", width='stretch')
                                     img_displayed = True
                             except Exception as e:
                                 pass
@@ -328,7 +328,7 @@ def main():
                                       cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 0, 0), 2)
                             
                             # Display placeholder
-                            st.image(placeholder, channels="BGR", use_container_width=True)
+                            st.image(placeholder, channels="BGR", width='stretch')
                             img_displayed = True
 
                         # Meta info
@@ -587,7 +587,7 @@ def main():
                         })
                     
                     df_labels = pd.DataFrame(label_data)
-                    st.dataframe(df_labels, use_container_width=True, hide_index=True)
+                    st.dataframe(df_labels, width='stretch', hide_index=True)
                     
                     st.markdown("---")
                     
@@ -603,7 +603,7 @@ def main():
                         })
                     
                     df_timeline = pd.DataFrame(timeline_data)
-                    st.dataframe(df_timeline, use_container_width=True, hide_index=True)
+                    st.dataframe(df_timeline, width='stretch', hide_index=True)
                     
                     st.markdown("---")
                     
@@ -625,7 +625,7 @@ def main():
                                     try:
                                         img = decode_base64_to_image(frame["data"])
                                         if img is not None:
-                                            st.image(img, channels="BGR", use_container_width=True)
+                                            st.image(img, channels="BGR", width='stretch')
                                             img_displayed = True
                                     except:
                                         pass
@@ -634,7 +634,7 @@ def main():
                                     try:
                                         img = decode_base64_to_image(frame["original_data"])
                                         if img is not None:
-                                            st.image(img, channels="BGR", use_container_width=True)
+                                            st.image(img, channels="BGR", width='stretch')
                                             img_displayed = True
                                     except:
                                         pass
@@ -649,7 +649,7 @@ def main():
                                     det_count = len(frame.get("detections", []))
                                     cv2.putText(placeholder, f"Det: {det_count}", (80, 220),
                                               cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 0), 1)
-                                    st.image(placeholder, channels="BGR", use_container_width=True)
+                                    st.image(placeholder, channels="BGR", width='stretch')
                                 
                                 # Frame info
                                 st.caption(f"⏰ {format_timestamp(frame.get('timestamp'))}")

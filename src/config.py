@@ -43,11 +43,11 @@ VIOLENCE_CLASSIFIER_FRAME_SKIP = 5  # Process every 5th frame to save resources
 # Batch size for classifier inference
 VIOLENCE_CLASSIFIER_BATCH_SIZE = 8
 
-# Harmful object classes that YOLOv8m_violence model detects
+# Harmful object classes that yolov8m_violence model detects
 # These are the classes the custom violence detection model was trained on
 HARMFUL_CLASSES = [
     "alcohol",
-    "blood", 
+    "blood",
     "cigarette",
     "fight detection - v1 2024-05-10 8-55pm",
     "gun",
