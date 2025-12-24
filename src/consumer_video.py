@@ -1,6 +1,6 @@
 """
-Video Consumer: Process video frames and detect harmful content using CLIP model
-UPDATED VERSION: Better Logging + Improved Detection Logic
+Video Consumer: Process video frames and detect harmful content using YOLOv8m model
+UPDATED VERSION: YOLOv8m violence detection with bounding box drawing
 """
 
 import logging
@@ -23,6 +23,8 @@ from config import (
     VIOLENCE_CLASSIFIER_THRESHOLD,
     VIOLENCE_CLASSIFIER_FRAME_SKIP,
     USE_ALL_DETECTIONS_AS_HARMFUL,
+    VIOLENCE_MODEL_PATH,
+    HARMFUL_CLASSES,
     LOG_LEVEL,
 )
 
@@ -31,6 +33,8 @@ from utils import (
     decode_base64_to_image,
     calculate_alert_level,
     save_image_for_training,
+    draw_detections,
+    encode_image_to_base64,
     MongoDBHandler,
     AlertThrottler,
 )
@@ -38,7 +42,7 @@ from utils import (
 # --- 1. CẤU HÌNH LOGGING ĐỂ XEM ĐƯỢC TRÊN AIRFLOW/FILE ---
 # Tạo logger
 logger = logging.getLogger("VideoConsumer")
-logger.setLevel(logging.DEBUG)  # Bắt buộc để mức DEBUG để xem chi tiết
+logger.setLevel(logging.DEBUG)
 
 # Format log
 formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
@@ -48,132 +52,55 @@ stream_handler = logging.StreamHandler(sys.stdout)
 stream_handler.setFormatter(formatter)
 logger.addHandler(stream_handler)
 
-# B. Handler ghi ra file (Để bạn check file nếu Console bị trôi)
-# file_handler = logging.FileHandler("video_consumer.log")
-# file_handler.setFormatter(formatter)
-# logger.addHandler(file_handler)
-
 # --- Dependency Check ---
 try:
-    import torch
-    import clip
-    from PIL import Image
-    import yaml
-
-    CLIP_AVAILABLE = True
+    from ultralytics import YOLO
+    YOLO_AVAILABLE = True
 except Exception as e:
     logger.warning(
-        f"CLIP/torch dependencies missing: {e}. AI detection will be disabled."
+        f"YOLO dependencies missing: {e}. AI detection will be disabled."
     )
-    CLIP_AVAILABLE = False
+    YOLO_AVAILABLE = False
 
 
 class VideoConsumer:
-    """Consumer for processing video frames and detecting harmful content"""
+    """Consumer for processing video frames and detecting harmful content using YOLOv8m"""
 
     def __init__(self, kafka_servers: str = KAFKA_BOOTSTRAP_SERVERS):
         self.kafka_servers = kafka_servers
         self.consumer = None
         self.db_handler = MongoDBHandler()
-        self.alert_throttler = AlertThrottler(
-            cooldown_seconds=2
-        )  # Giảm cooldown để test dễ hơn
+        self.alert_throttler = AlertThrottler(cooldown_seconds=2)
         self.frame_count = 0
 
-        self.clip_model = None
-        self.clip_preprocess = None
+        self.yolo_model = None
         self.device = None
-        self.text_features = None
-        self.violence_labels = []
-        self.violence_indices = []
 
-        logger.info("Initializing VideoConsumer...")
+        logger.info("Initializing VideoConsumer with YOLOv8m...")
         self.load_model()
 
     def load_model(self):
-        """Load CLIP model and labels"""
+        """Load YOLOv8m model"""
         if not USE_VIOLENCE_CLASSIFIER:
             logger.info("🚫 Violence classifier disabled by config.")
             return
 
-        if not CLIP_AVAILABLE:
-            logger.error("❌ CLIP not available. Cannot load model.")
+        if not YOLO_AVAILABLE:
+            logger.error("❌ YOLO not available. Cannot load model.")
             return
 
-        # 1. Load Labels
-        settings_path = Path(__file__).parent.parent / "src/violence_settings.yaml"
-        logger.info(f"Loading label settings from: {settings_path}")
-        non_violence = []
-        violence = []
-
-        # Default labels (Fallback cực mạnh nếu không load được file)
-        default_safe = [
-            "peaceful scene",
-            "people walking",
-            "normal street",
-            "friends hugging",
-        ]
-        default_violence = [
-            "violent fighting",
-            "punching and hitting",
-            "kicking",
-            "bloody scene",
-            "holding weapon",
-        ]
-
-        if settings_path.exists():
-            try:
-                with open(settings_path, "r", encoding="utf-8") as f:
-                    settings = yaml.safe_load(f)
-                label_settings = settings.get("label-settings", {})
-                non_violence = label_settings.get("non-violence-labels", default_safe)
-                violence = label_settings.get("violence-labels", default_violence)
-                logger.info(
-                    f"Loaded YAML: {len(non_violence)} Safe, {len(violence)} Violence"
-                )
-            except Exception as e:
-                logger.warning(f"YAML Error: {e}. Using defaults.")
-                non_violence = default_safe
-                violence = default_violence
-        else:
-            logger.warning("YAML not found. Using defaults.")
-            non_violence = default_safe
-            violence = default_violence
-
-        self.violence_labels = non_violence + violence
-        self.violence_indices = list(
-            range(len(non_violence), len(self.violence_labels))
-        )
-
-        logger.info(f"Monitor Labels: {self.violence_labels}")
-        logger.info(f"Violence IDs: {self.violence_indices}")
-
-        # 2. Load CLIP Model
         try:
-            self.device = "cuda" if torch.cuda.is_available() else "cpu"
-            logger.info(f"Using AI Device: {self.device.upper()}")
-
-            # Load model
-            self.clip_model, self.clip_preprocess = clip.load(
-                "ViT-B/32", device=self.device
-            )
-
-            # Precompute Embeddings
-            logger.info("Precomputing text embeddings...")
-            text_descriptions = [
-                f"a photo of {label}" for label in self.violence_labels
-            ]
-            text_tokens = clip.tokenize(text_descriptions).to(self.device)
-
-            with torch.no_grad():
-                self.text_features = self.clip_model.encode_text(text_tokens)
-                self.text_features /= self.text_features.norm(dim=-1, keepdim=True)
-
-            logger.info("✅ Model loaded successfully.")
-
+            logger.info(f"Loading YOLO model from: {VIOLENCE_MODEL_PATH}")
+            self.yolo_model = YOLO(VIOLENCE_MODEL_PATH)
+            self.device = "cuda" if self.yolo_model.device.type == "cuda" else "cpu"
+            logger.info(f"✅ YOLOv8m model loaded successfully on {self.device.upper()}")
+            
+            # Log model information
+            logger.info(f"Model: {self.yolo_model.model}")
+            
         except Exception as e:
-            logger.error(f"❌ Critical Error loading CLIP: {e}")
-            self.clip_model = None
+            logger.error(f"❌ Critical Error loading YOLOv8m: {e}")
+            self.yolo_model = None
 
     def connect_kafka(self):
         try:
@@ -193,62 +120,55 @@ class VideoConsumer:
 
     def detect_objects(self, frame) -> List[Dict[str, Any]]:
         """
-        Logic AI Cải tiến: Xem xét Top 5 xác suất thay vì chỉ Top 1
+        Detect harmful objects using YOLOv8m model
+        Returns list of detections with bounding boxes
         """
-        if not USE_VIOLENCE_CLASSIFIER or self.clip_model is None:
+        if not USE_VIOLENCE_CLASSIFIER or self.yolo_model is None:
             return []
 
         if self.frame_count % VIOLENCE_CLASSIFIER_FRAME_SKIP != 0:
             return []
 
         try:
-            # Preprocess
-            rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            pil_image = Image.fromarray(rgb_frame)
-            image_input = self.clip_preprocess(pil_image).unsqueeze(0).to(self.device)
-
-            # Inference
-            with torch.no_grad():
-                image_features = self.clip_model.encode_image(image_input)
-                image_features /= image_features.norm(dim=-1, keepdim=True)
-
-                # Tính độ tương đồng
-                similarity = (100.0 * image_features @ self.text_features.T).softmax(
-                    dim=-1
-                )
-
-                # Lấy Top 5 kết quả cao nhất
-                values, indices = similarity[0].topk(5)
-
+            # Run inference
+            results = self.yolo_model(frame, conf=VIOLENCE_CLASSIFIER_THRESHOLD, verbose=False)
+            
             detections = []
-            log_msg = []
-
-            # Duyệt qua 5 kết quả cao nhất
-            for value, index in zip(values, indices):
-                idx = index.item()
-                prob = value.item()  # Ví dụ: 0.85
-                label = self.violence_labels[idx]
-
-                log_msg.append(f"{label}({prob:.2f})")
-
-                # LOGIC QUAN TRỌNG:
-                # Nếu label thuộc nhóm bạo lực VÀ độ tin cậy > ngưỡng
-                if idx in self.violence_indices:
-                    if prob >= VIOLENCE_CLASSIFIER_THRESHOLD:
-                        logger.warning(f"🚨 FOUND VIOLENCE: {label} - {prob:.2%}")
-                        detections.append(
-                            {
-                                "class": label,
-                                "class_id": idx,
-                                "confidence": prob,
-                                "bbox": None,
-                            }
-                        )
-
-            # In log debug mỗi 20 frame để bạn biết model đang nhìn thấy gì
-            if self.frame_count % 20 == 0:
-                logger.info(f"Frame {self.frame_count} analysis: {', '.join(log_msg)}")
-
+            
+            # Process results
+            for result in results:
+                boxes = result.boxes
+                
+                for i, box in enumerate(boxes):
+                    # Get detection info
+                    class_id = int(box.cls[0])
+                    confidence = float(box.conf[0])
+                    
+                    # Get class name from model
+                    class_name = self.yolo_model.model.names[class_id] if hasattr(self.yolo_model.model, 'names') else f"class_{class_id}"
+                    
+                    # Get bounding box coordinates (normalized to 0-1)
+                    x1, y1, x2, y2 = box.xyxy[0]
+                    
+                    # Denormalize to image dimensions
+                    height, width = frame.shape[:2]
+                    x1 = int(x1)
+                    y1 = int(y1)
+                    x2 = int(x2)
+                    y2 = int(y2)
+                    
+                    logger.info(f"Detection: {class_name} ({confidence:.2%}) at [{x1},{y1},{x2},{y2}]")
+                    
+                    detections.append({
+                        "class": class_name,
+                        "class_id": class_id,
+                        "confidence": confidence,
+                        "bbox": [x1, y1, x2, y2],
+                    })
+            
+            if self.frame_count % 20 == 0 and detections:
+                logger.info(f"Frame {self.frame_count}: Found {len(detections)} detections")
+            
             return detections
 
         except Exception as e:
@@ -285,18 +205,25 @@ class VideoConsumer:
             result = self.check_harmful_content(detections)
 
             if result["is_harmful"]:
-                # Save DB
+                # Draw bounding boxes on the frame
+                frame_with_boxes = draw_detections(frame, detections)
+                
+                # Encode the annotated frame to base64
+                annotated_frame_data = encode_image_to_base64(frame_with_boxes)
+                
+                # Save to DB with annotated frame
                 self.db_handler.save_detection(
                     {
                         "frame_id": frame_id,
                         "timestamp": timestamp,
                         "detections": result["harmful_detections"],
                         "is_harmful": True,
-                        "data": frame_data,
+                        "data": annotated_frame_data,  # Save annotated frame instead
+                        "original_data": frame_data,  # Keep original for reference
                     }
                 )
                 # Alert
-                self.generate_alert(frame_id, result, frame)
+                self.generate_alert(frame_id, result, frame_with_boxes)
 
             if self.frame_count % 100 == 0:
                 logger.info(f"Processed {self.frame_count} frames...")

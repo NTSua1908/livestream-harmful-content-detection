@@ -27,34 +27,37 @@ AUDIO_SAMPLE_RATE = 16000
 AUDIO_CHUNK_DURATION = 3  # seconds
 AUDIO_FORMAT = "wav"
 
-# Vision Transformer (ViT) classifier for frame-level violence detection
-# This model is a classifier (violence / non-violence). It does NOT return bounding boxes.
-# Place the Hugging Face repo or extracted files in: models/vit-base-violence-detection/
-VIOLENCE_CLASSIFIER_DIR = str(MODELS_DIR / "vit-base-violence-detection")
-# Enable the ViT classifier. If True the consumer will run the classifier on frames
+# YOLOv8m Violence Detection Model
+# Custom trained model for violence detection
+VIOLENCE_MODEL_PATH = str(MODELS_DIR / "yolov8m_violence.pt")
+# Enable the YOLOv8m model. If True the consumer will run object detection on frames
 USE_VIOLENCE_CLASSIFIER = True
-# Softmax probability threshold for the 'violence' class (0..1)
+# Confidence threshold for detections (0..1)
 # Lower threshold = more sensitive detection (more false positives)
 # Higher threshold = less sensitive detection (may miss some violence)
-VIOLENCE_CLASSIFIER_THRESHOLD = 0.3  # Lowered to 0.3 for more sensitive detection
+VIOLENCE_CLASSIFIER_THRESHOLD = 0.5  # Confidence threshold for YOLO detections
 # How many frames to skip between classifier inferences (1 = every frame)
-VIOLENCE_CLASSIFIER_FRAME_SKIP = 1  # Changed from 3 to process more frames
-# Batch size for classifier inference (if using batched evaluation)
+# Increased from 1 to 5 to reduce resource usage and database bloat
+# At 25 FPS: 5 = process every 200ms (~5 frames/second instead of 25)
+VIOLENCE_CLASSIFIER_FRAME_SKIP = 5  # Process every 5th frame to save resources
+# Batch size for classifier inference
 VIOLENCE_CLASSIFIER_BATCH_SIZE = 8
 
-# Harmful object classes (customize based on your model)
-# For YOLOv8n default model (COCO dataset), use these real classes:
+# Harmful object classes that YOLOv8m_violence model detects
+# These are the classes the custom violence detection model was trained on
 HARMFUL_CLASSES = [
+    "alcohol",
+    "blood", 
+    "cigarette",
+    "fight detection - v1 2024-05-10 8-55pm",
+    "gun",
+    "insulting_gesture",
     "knife",
-    "scissors",
-    "person",  # Can detect person for violence context
-    # Note: Default YOLOv8 doesn't detect violence directly
-    # You need a custom-trained model for violence detection
 ]
 
 # Alternative: Use ALL detections for demo purposes
 # Set to False for real inference; True will mark every detection as harmful (testing only)
-USE_ALL_DETECTIONS_AS_HARMFUL = False  # TEMPORARILY SET TO TRUE FOR TESTING
+USE_ALL_DETECTIONS_AS_HARMFUL = False
 
 # Whisper model configuration
 WHISPER_MODEL = "base"  # Options: tiny, base, small, medium, large

@@ -37,15 +37,15 @@ graph TD
     end
 
     subgraph "3. Processing Layer (Local Workers)"
-        C1 -->|Consumer 1| D[AI Vision Model<br/>(YOLOv8)]
-        C2 -->|Consumer 2| E[AI Audio Model<br/>(Whisper + NLP)]
+        C1 -->|Consumer 1| D["AI Vision Model<br/>(YOLOv8)"]
+        C2 -->|Consumer 2| E["AI Audio Model<br/>(Whisper + NLP)"]
         D --> F[Database / Dashboard]
         E --> F
         D -.->|Lưu dữ liệu mới| G[(Local Dataset)]
     end
 
     subgraph "4. Orchestration (Local)"
-        H[Apache Airflow] -->|Trigger HTTP| I[VS Code Port Forwarding<br/>(localhost:8000)]
+        H[Apache Airflow] -->|Trigger HTTP| I["VS Code Port Forwarding<br/>(localhost:8000)"]
         I -->|Tunnel SSH| J[Google Colab API]
     end
 

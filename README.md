@@ -164,7 +164,7 @@ mkdir -p models
 4. **DAG sẽ tự động:**
 
    - ✅ Check dependencies
-   - ✅ Start Producer (video Harmful_livestream_detection.mp4 loop)
+   - ✅ Start Producer (video gun.mp4 loop)
    - ✅ Start Video Consumer (YOLOv8)
    - ✅ Start Audio Consumer (Whisper)
    - ✅ Verify pipeline hoạt động
@@ -184,7 +184,7 @@ mkdir -p models
 ```bash
 # Terminal 1 - Producer
 cd src
-python producer.py --video ../data/Harmful_livestream_detection.mp4 --loop
+python producer.py --video ../data/gun.mp4 --loop
 
 # Terminal 2 - Video Consumer
 cd src
@@ -224,7 +224,7 @@ streamlit run dashboard.py
 - **Cách dùng**: Click trigger DAG trong Airflow UI
 - **Tính năng**:
   - ✅ Kiểm tra Kafka và MongoDB trước khi chạy
-  - ✅ Start Producer với video hard-code (`Harmful_livestream_detection.mp4`)
+  - ✅ Start Producer với video hard-code (`gun.mp4`)
   - ✅ Start Video + Audio Consumers song song
   - ✅ Verify pipeline sau khi khởi động
 

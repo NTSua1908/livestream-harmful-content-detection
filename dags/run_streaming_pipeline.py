@@ -37,7 +37,7 @@ DATA_DIR = "/opt/airflow/data"
 # Log sẽ hiện ra từng dòng "Sent frame X..."
 start_producer = BashOperator(
     task_id="start_producer",
-    bash_command=f"cd {SRC_DIR} && python -u producer.py --video {DATA_DIR}/Harmful_livestream_detection.mp4",
+    bash_command=f"cd {SRC_DIR} && python -u producer.py --video {DATA_DIR}/gun.mp4",
     dag=dag,
 )
 

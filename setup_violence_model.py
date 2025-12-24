@@ -164,7 +164,7 @@ def download_violence_model():
         print("   2. Update config.py if needed")
         print("   3. Restart consumer: python src/consumer_video.py")
         print(
-            "   4. Test with: python src/producer.py --video data/Harmful_livestream_detection.mp4"
+            "   4. Test with: python src/producer.py --video data/gun.mp4"
         )
 
         return True

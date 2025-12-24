@@ -52,7 +52,7 @@ python init_project.py
 ```powershell
 # Terminal 1 - Producer
 cd src
-python producer.py --video ../data/Harmful_livestream_detection.mp4 --loop
+python producer.py --video ../data/gun.mp4 --loop
 
 # Terminal 2 - Video Consumer
 cd src
